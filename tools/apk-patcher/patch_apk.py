@@ -76,7 +76,9 @@ def main():
 
     with tempfile.TemporaryDirectory() as tmp:
         work = Path(tmp) / "apk"
-        run(apktool, "d", "-f", "-o", work, args.apk)
+        # -r: nao decodifica recursos nem o manifesto. So mexemos em smali e lib/,
+        # e remontar recursos falha com frameworks antigos do apktool em cache.
+        run(apktool, "d", "-f", "-r", "-o", work, args.apk)
 
         # 2. bibliotecas: somente para as ABIs que o APK ja tem
         lib_root = work / "lib"
