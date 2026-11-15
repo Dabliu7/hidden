@@ -12,6 +12,15 @@ constexpr uintptr_t kVersionProbe10US = 0x82457C;
 constexpr uint32_t  kVersionProbeValue = 0x94BF;
 
 constexpr uintptr_t CGame_Process       = 0x53BEE0; // void __cdecl CGame::Process()
+constexpr uintptr_t CText_Get           = 0x6A0050; // const char* __thiscall CText::Get(const char* key)
+constexpr uintptr_t CHud_SetHelpMessage = 0x588BE0; // void __cdecl (const char*, bool quick, bool permanent, bool brief)
+
+// Front-end
+constexpr uintptr_t CMenuManager_aScreens        = 0x8CE008; // 44 paginas de 0xE2 bytes
+constexpr uintptr_t FrontEndMenuManager          = 0xBA6748;
+constexpr uintptr_t CMenuManager_m_nCurrentRow   = 0x54;     // int: linha selecionada
+constexpr uintptr_t CMenuManager_m_nCurrentPage  = 0x15D;    // uint8: pagina atual
+
 constexpr uintptr_t CWorld_Players      = 0xB7CD98; // CPlayerInfo[2]; +0 = CPlayerPed*
 
 // CPed / CPhysical / CPlaceable (x86)

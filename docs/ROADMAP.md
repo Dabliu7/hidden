@@ -40,8 +40,8 @@ posição percebido < 0,5 m com 100 ms de RTT e 2 % de perda.
 
 Objetivo: entrar em sessão só pela interface nativa.
 
-- [ ] `[win32][ui]` Entrada "Cooperativo (1-4 Jogadores)" no menu principal (`aScreens`)
-- [ ] `[win32][ui]` Hook de `CText::Get` para chaves `COOP_*` (pt-BR, en, es)
+- [x] `[win32][ui]` Entrada "Cooperativo (1-4 Jogadores)" no menu principal (`aScreens`) — abre Novo Jogo/Carregar e hospeda; aguardando validação em jogo
+- [ ] `[win32][ui]` Hook de `CText::Get` para chaves `COOP_*` (pt-BR, en, es) — hoje só `COOP_MN`, texto fixo
 - [ ] `[win32][ui]` Páginas virtuais (id ≥ 44): hooks de `DrawStandardMenus`, `UserInput`, `SwitchToNewScreen`
 - [ ] `[win32][ui]` Auditoria de todos os acessos a `aScreens[m_nCurrentMenuPage]` (guardas para páginas virtuais)
 - [ ] `[win32][ui]` Campo de texto (IP / código) via `WM_CHAR`, com colar

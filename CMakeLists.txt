@@ -101,6 +101,7 @@ target_link_libraries(coop_core PUBLIC enet PRIVATE coop_options)
 if(COOP_PLATFORM STREQUAL "win32")
   add_library(coop_win32 SHARED
     platform/win32/dllmain.cpp
+    platform/win32/Menu.cpp
     platform/win32/dinput8.def)
   set_target_properties(coop_win32 PROPERTIES OUTPUT_NAME dinput8 PREFIX "")
   target_include_directories(coop_win32 PRIVATE platform)

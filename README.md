@@ -39,7 +39,11 @@ MoonLoader**.
 3. Copie `dinput8.dll` para a pasta onde está o `gta_sa.exe`.
 4. Abra o jogo. Para desinstalar, apague o arquivo.
 
-Enquanto o menu nativo (M2) não chega, a sessão é iniciada por parâmetro:
+No menu principal aparece **Cooperativo (1-4 Jogadores)**, logo abaixo de "Iniciar Jogo". Entrar por
+ela abre a tela nativa de Novo Jogo/Carregar e, ao começar a partida, abre a sala como host
+(experimental: jogadores remotos ainda não são desenhados no mundo — milestone M1).
+
+Entrar na sala de outra pessoa ainda é por parâmetro, assim como hospedar sem passar pelo menu:
 
 ```
 gta_sa.exe -coop-host

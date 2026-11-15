@@ -18,6 +18,7 @@
 
 #include "Runtime.h"
 #include "win32/Addresses.h"
+#include "win32/Menu.h"
 
 namespace {
 
@@ -79,13 +80,26 @@ bool ReadLocalPlayer(PlayerSnapshot& s) {
     return true;
 }
 
-// Fase 1: sessao iniciada por linha de comando (-coop-host | -coop-connect <ip>).
-// A partir da Fase 2 isso passa a ser acionado pelo menu nativo.
+void ShowHelp(const char* text) {
+    Log("[coop] exibindo mensagem na tela: %s", text);
+    reinterpret_cast<void(__cdecl*)(const char*, bool, bool, bool)>(addr::CHud_SetHelpMessage)(
+        text, false, false, false);
+}
+
+void StartHosting() {
+    bool ok = Runtime::Get().StartHost();
+    Log("[coop] host na porta %u: %s", static_cast<unsigned>(kDefaultPort), ok ? "ok" : "FALHOU");
+    ShowHelp(ok ? "Coop: sala aberta na porta 7777. Aguardando jogadores."
+                : "Coop: nao foi possivel abrir a porta 7777.");
+}
+
+// Sessao por linha de comando (-coop-host | -coop-connect <ip>); o menu nativo
+// cobre apenas "hospedar" por enquanto.
 void StartSessionFromCommandLine() {
     std::string cmd = GetCommandLineA();
     auto& rt = Runtime::Get();
     if (cmd.find("-coop-host") != std::string::npos) {
-        Log("[coop] host: %s", rt.StartHost() ? "ok" : "FALHOU");
+        StartHosting();
     } else if (auto p = cmd.find("-coop-connect "); p != std::string::npos) {
         std::string ip = cmd.substr(p + 14);
         ip = ip.substr(0, ip.find(' '));
@@ -102,6 +116,8 @@ void __cdecl Hook_GameProcess() {
     }
 
     auto& rt = Runtime::Get();
+    // Entrou no jogo pela entrada "Cooperativo" do menu principal.
+    if (!rt.Active() && coop::win32::menu::HostRequested()) StartHosting();
     DWORD now = GetTickCount();
     rt.Frame(now);
 
@@ -123,6 +139,7 @@ void InstallHooks() {
         return;
     }
     if (MH_Initialize() != MH_OK) return;
+    coop::win32::menu::Install(&Log);
     if (MH_CreateHook(reinterpret_cast<LPVOID>(addr::CGame_Process),
                       reinterpret_cast<LPVOID>(&Hook_GameProcess),
                       reinterpret_cast<LPVOID*>(&g_origGameProcess)) != MH_OK ||
