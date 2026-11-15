@@ -1,0 +1,16 @@
+build/
+build-*/
+out/
+dist/
+.vs/
+.vscode/
+.idea/
+CMakeUserPresets.json
+*.log
+# Nunca versionar arquivos do jogo
+*.apk
+*.obb
+*.img
+*.scm
+gta_sa.exe
+libGTASA.so

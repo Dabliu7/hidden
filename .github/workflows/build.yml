@@ -1,0 +1,107 @@
+name: build
+
+on:
+  push:
+  pull_request:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  core-tests:
+    name: Core (Linux, testes)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCOOP_WERROR=ON
+      - name: Build
+        run: cmake --build build
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  windows-msvc:
+    name: Windows x86 (MSVC)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -A Win32
+      - name: Build
+        run: cmake --build build --config Release --parallel
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gtasa-coop-windows-x86
+          path: build/Release/dinput8.dll
+          if-no-files-found: error
+
+  windows-mingw:
+    name: Windows x86 (MinGW cross)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends g++-mingw-w64-i686 ninja-build
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCOOP_WERROR=ON
+          -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-mingw-i686.cmake
+      - name: Build
+        run: cmake --build build
+      - name: Verifica exportacao do proxy
+        run: i686-w64-mingw32-objdump -p build/dinput8.dll | grep -q DirectInput8Create
+
+  android:
+    name: Android (${{ matrix.abi }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        abi: [armeabi-v7a, arm64-v8a]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_LATEST_HOME/build/cmake/android.toolchain.cmake"
+          -DANDROID_ABI=${{ matrix.abi }} -DANDROID_PLATFORM=android-24 -DANDROID_STL=c++_static
+      - name: Build
+        run: cmake --build build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gtasa-coop-android-${{ matrix.abi }}
+          path: build/libGTASA_Coop.so
+          if-no-files-found: error
+
+  release:
+    name: Publica binarios na release
+    if: github.event_name == 'release'
+    needs: [core-tests, windows-msvc, windows-mingw, android]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Empacota
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          mkdir -p dist android/lib/armeabi-v7a android/lib/arm64-v8a
+          (cd artifacts/gtasa-coop-windows-x86 && zip -9 "$GITHUB_WORKSPACE/dist/gtasa-coop-$TAG-windows-x86.zip" dinput8.dll)
+          cp artifacts/gtasa-coop-android-armeabi-v7a/libGTASA_Coop.so android/lib/armeabi-v7a/
+          cp artifacts/gtasa-coop-android-arm64-v8a/libGTASA_Coop.so android/lib/arm64-v8a/
+          (cd android && zip -9 -r "$GITHUB_WORKSPACE/dist/gtasa-coop-$TAG-android.zip" lib)
+          (cd dist && sha256sum * > SHA256SUMS.txt)
+      - name: Upload
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "$TAG" dist/* --clobber --repo "$GITHUB_REPOSITORY"

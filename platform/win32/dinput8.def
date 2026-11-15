@@ -1,0 +1,3 @@
+LIBRARY dinput8
+EXPORTS
+    DirectInput8Create = Coop_DirectInput8Create @1
