@@ -9,6 +9,8 @@
 
 #include <cstring>
 
+#include <MinHook.h>
+
 namespace coop::win32::fixes {
 
 namespace {
@@ -56,8 +58,10 @@ GetDeviceState_t g_origGetDeviceState = nullptr;
 Acquire_t        g_origAcquire = nullptr;
 SetCoopLevel_t   g_origSetCoopLevel = nullptr;
 void*            g_mouse = nullptr;
-int              g_logBudget = 12; // diagnostico limitado: nao encher o log
+int              g_logBudget = 24; // diagnostico limitado: nao encher o log
 bool             g_loggedRecovery = false;
+bool             g_gameplay = false;  // o jogo pediu modo exclusivo => esta em jogo, nao em menu
+bool             g_skipDelta = true;  // descarta o primeiro deslocamento apos entrar em jogo
 
 void** VTable(void* object) { return *reinterpret_cast<void***>(object); }
 
@@ -72,6 +76,11 @@ bool PatchSlot(void** vtable, int index, void* replacement, void** original) {
 
 HRESULT WINAPI Hook_SetCoopLevel(void* self, HWND window, DWORD flags) {
     if (self != g_mouse) return g_origSetCoopLevel(self, window, flags);
+    // O jogo pede exclusivo (0x5) durante a partida e nao-exclusivo (0x6) nos
+    // menus, onde o cursor e o do Windows e nao pode ser preso no centro.
+    bool gameplay = (flags & kExclusive) != 0;
+    if (gameplay && !g_gameplay) g_skipDelta = true;
+    g_gameplay = gameplay;
     DWORD fixed = (flags & ~kExclusive) | kNonExclusive;
     HRESULT hr = g_origSetCoopLevel(self, window, fixed);
     if (g_logBudget > 0) {
@@ -108,6 +117,7 @@ bool WeAreForeground(HWND* window) {
 // botoes enquanto o Windows ve o mouse sendo usado), passamos a preencher o
 // estado com as APIs comuns do Windows. A roda do mouse nao e coberta.
 bool  g_fallback = false;
+
 int   g_diAlive = 0;       // leituras em que o DirectInput trouxe algo
 int   g_deadEvidence = 0;  // leituras mudas com o mouse em uso segundo o Windows
 POINT g_lastCursor = {};
@@ -121,14 +131,19 @@ void FillFromWindows(HWND window, MouseState* st) {
     center.x = (rc.right - rc.left) / 2;
     center.y = (rc.bottom - rc.top) / 2;
     ClientToScreen(window, &center);
-    st->x = pos.x - center.x;
-    st->y = pos.y - center.y;
-    st->wheel = 0;
+    st->x = st->y = st->wheel = 0;
+    if (g_gameplay) {
+        if (!g_skipDelta) {
+            st->x = pos.x - center.x;
+            st->y = pos.y - center.y;
+        }
+        g_skipDelta = false;
+        SetCursorPos(center.x, center.y); // proxima leitura mede o deslocamento a partir do centro
+    }
     st->buttons[0] = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) ? 0x80 : 0;
     st->buttons[1] = (GetAsyncKeyState(VK_RBUTTON) & 0x8000) ? 0x80 : 0;
     st->buttons[2] = (GetAsyncKeyState(VK_MBUTTON) & 0x8000) ? 0x80 : 0;
     st->buttons[3] = 0;
-    SetCursorPos(center.x, center.y); // proxima leitura mede o deslocamento a partir do centro
 }
 
 HRESULT WINAPI Hook_GetDeviceState(void* self, DWORD size, void* data) {
@@ -207,72 +222,192 @@ HRESULT WINAPI Hook_CreateDevice(void* self, const GUID& guid, void** device, vo
 // ---------------------------------------------------------------------------
 // Resolucao / memoria de video
 // O jogo descarta da lista de resolucoes os modos que "nao cabem" na memoria
-// de video livre, consultada por DirectDraw (GetAvailableVidMem). Em placas
-// modernas esse numero de 32 bits estoura e chega pequeno ou sem sentido, e
-// as resolucoes altas somem. Interceptamos a consulta e devolvemos 1 GB.
+// de video livre. Em placas modernas esse numero de 32 bits estoura e chega
+// pequeno, negativo ou sem sentido, e as resolucoes altas somem. Como nao
+// sabemos por qual API o executavel consulta a memoria, interceptamos as
+// candidatas nas proprias DLLs do sistema (vale para import estatico,
+// GetProcAddress ou COM) e devolvemos 1 GB:
+//   - DirectDraw: IDirectDraw2/4/7::GetAvailableVidMem
+//   - Direct3D 9: IDirect3DDevice9::GetAvailableTextureMem
+// O log registra o que cada uma devolveu de verdade e os modos que o D3D9
+// enumerou para o jogo.
 // ---------------------------------------------------------------------------
-constexpr int   kDD7_GetAvailableVidMem = 23;
 constexpr DWORD kReportedVideoMem = 0x40000000; // 1 GB: cabe qualquer modo e nao estoura conta com sinal
 
-using DirectDrawCreateEx_t = HRESULT(WINAPI*)(GUID* guid, void** dd, const IID& iid, IUnknown* outer);
-using GetAvailableVidMem_t = HRESULT(WINAPI*)(void* self, void* caps, DWORD* total, DWORD* free);
+constexpr GUID kIID_DD2   = {0xB3A6F3E0, 0x2B43, 0x11CF, {0xA2, 0xDE, 0x00, 0xAA, 0x00, 0xB9, 0x33, 0x56}};
+constexpr GUID kIID_DD4   = {0x9C59509A, 0x39BD, 0x11D1, {0x8C, 0x4A, 0x00, 0xC0, 0x4F, 0xD9, 0x30, 0xC5}};
+constexpr GUID kIID_DD7   = {0x15E65EC0, 0x3B9C, 0x11D2, {0xB9, 0x2F, 0x00, 0x60, 0x97, 0x97, 0xEA, 0x5B}};
+constexpr GUID kCLSID_DD  = {0xD7B70EE0, 0x4340, 0x11CF, {0xB0, 0x63, 0x00, 0x20, 0xAF, 0xC2, 0xCD, 0x35}};
+constexpr GUID kCLSID_DD7 = {0x3C305196, 0x50DB, 0x11D3, {0x9C, 0xFE, 0x00, 0xC0, 0x4F, 0xD9, 0x30, 0xC5}};
 
-DirectDrawCreateEx_t g_origDirectDrawCreateEx = nullptr;
-GetAvailableVidMem_t g_origGetAvailableVidMem = nullptr;
-int                  g_vidMemLogs = 4;
+constexpr int kUnk_QueryInterface      = 0;
+constexpr int kDD_GetAvailableVidMem   = 23;
+constexpr int kD3D9_EnumAdapterModes   = 7;
+constexpr int kD3D9_CreateDevice       = 16;
+constexpr int kDev9_GetAvailTextureMem = 4;
+
+bool Same(const GUID& a, const GUID& b) { return std::memcmp(&a, &b, sizeof(GUID)) == 0; }
+
+// Uma mesma funcao-gancho atende varias vtables (IDirectDraw2/4/7 tem
+// implementacoes distintas); guardamos o original por vtable.
+struct SlotHook { void** vtable; void* original; };
+struct SlotTable {
+    SlotHook items[6];
+    int count = 0;
+    void* Find(void* object) const {
+        for (int i = 0; i < count; ++i)
+            if (items[i].vtable == VTable(object)) return items[i].original;
+        return nullptr;
+    }
+    bool Install(void* object, int slot, void* replacement) {
+        if (Find(object)) return true;
+        if (count >= 6) return false;
+        void* orig = nullptr;
+        if (!PatchSlot(VTable(object), slot, replacement, &orig)) return false;
+        items[count++] = {VTable(object), orig};
+        return true;
+    }
+};
+SlotTable g_vidMemHooks, g_queryHooks;
+int g_videoLogs = 10;
+
+void VideoLog(const char* fmt, unsigned long a = 0, unsigned long b = 0, unsigned long c = 0) {
+    if (g_videoLogs <= 0) return;
+    --g_videoLogs;
+    g_log(fmt, a, b, c);
+}
+
+void OnDirectDrawObject(void* object, const GUID& iid);
 
 HRESULT WINAPI Hook_GetAvailableVidMem(void* self, void* caps, DWORD* total, DWORD* free) {
-    HRESULT hr = g_origGetAvailableVidMem(self, caps, total, free);
-    DWORD t = total ? *total : 0, f = free ? *free : 0;
+    using Fn = HRESULT(WINAPI*)(void*, void*, DWORD*, DWORD*);
+    auto orig = reinterpret_cast<Fn>(g_vidMemHooks.Find(self));
+    HRESULT hr = orig ? orig(self, caps, total, free) : S_OK;
+    VideoLog("[coop] resolucao: DirectDraw informou memoria total=%lu livre=%lu (resultado 0x%08lX); repassando 1 GB.",
+             total ? *total : 0, free ? *free : 0, static_cast<unsigned long>(hr));
     if (total) *total = kReportedVideoMem;
     if (free) *free = kReportedVideoMem;
-    if (g_vidMemLogs > 0) {
-        --g_vidMemLogs;
-        g_log("[coop] resolucao: memoria de video informada pelo sistema total=%lu livre=%lu (resultado 0x%08X); "
-              "repassando 1 GB ao jogo.", t, f, hr);
-    }
     return S_OK;
 }
 
-HRESULT WINAPI Hook_DirectDrawCreateEx(GUID* guid, void** dd, const IID& iid, IUnknown* outer) {
+HRESULT WINAPI Hook_DDQueryInterface(void* self, const GUID& iid, void** out) {
+    using Fn = HRESULT(WINAPI*)(void*, const GUID&, void**);
+    auto orig = reinterpret_cast<Fn>(g_queryHooks.Find(self));
+    if (!orig) return E_NOINTERFACE;
+    HRESULT hr = orig(self, iid, out);
+    if (SUCCEEDED(hr) && out && *out) OnDirectDrawObject(*out, iid);
+    return hr;
+}
+
+void OnDirectDrawObject(void* object, const GUID& iid) {
+    if (Same(iid, kIID_DD2) || Same(iid, kIID_DD4) || Same(iid, kIID_DD7)) {
+        if (g_vidMemHooks.Install(object, kDD_GetAvailableVidMem, reinterpret_cast<void*>(&Hook_GetAvailableVidMem)))
+            VideoLog("[coop] resolucao: consulta de memoria do DirectDraw interceptada.");
+    } else {
+        // IDirectDraw (v1) nao tem a consulta: o jogo pedira uma versao nova por QueryInterface.
+        g_queryHooks.Install(object, kUnk_QueryInterface, reinterpret_cast<void*>(&Hook_DDQueryInterface));
+    }
+}
+
+using DirectDrawCreate_t   = HRESULT(WINAPI*)(GUID*, void**, IUnknown*);
+using DirectDrawCreateEx_t = HRESULT(WINAPI*)(GUID*, void**, const GUID&, IUnknown*);
+using CoCreateInstance_t   = HRESULT(WINAPI*)(const GUID&, IUnknown*, DWORD, const GUID&, void**);
+DirectDrawCreate_t   g_origDirectDrawCreate = nullptr;
+DirectDrawCreateEx_t g_origDirectDrawCreateEx = nullptr;
+CoCreateInstance_t   g_origCoCreateInstance = nullptr;
+
+HRESULT WINAPI Hook_DirectDrawCreate(GUID* guid, void** dd, IUnknown* outer) {
+    HRESULT hr = g_origDirectDrawCreate(guid, dd, outer);
+    VideoLog("[coop] resolucao: o jogo chamou DirectDrawCreate (resultado 0x%08lX).", static_cast<unsigned long>(hr));
+    if (SUCCEEDED(hr) && dd && *dd) OnDirectDrawObject(*dd, GUID{});
+    return hr;
+}
+
+HRESULT WINAPI Hook_DirectDrawCreateEx(GUID* guid, void** dd, const GUID& iid, IUnknown* outer) {
     HRESULT hr = g_origDirectDrawCreateEx(guid, dd, iid, outer);
-    if (SUCCEEDED(hr) && dd && *dd && !g_origGetAvailableVidMem) {
-        void* orig = nullptr;
-        if (PatchSlot(VTable(*dd), kDD7_GetAvailableVidMem, reinterpret_cast<void*>(&Hook_GetAvailableVidMem), &orig)) {
-            g_origGetAvailableVidMem = reinterpret_cast<GetAvailableVidMem_t>(orig);
-            g_log("[coop] resolucao: consulta de memoria de video interceptada.");
-        }
+    VideoLog("[coop] resolucao: o jogo chamou DirectDrawCreateEx (resultado 0x%08lX).", static_cast<unsigned long>(hr));
+    if (SUCCEEDED(hr) && dd && *dd) OnDirectDrawObject(*dd, iid);
+    return hr;
+}
+
+HRESULT WINAPI Hook_CoCreateInstance(const GUID& clsid, IUnknown* outer, DWORD ctx, const GUID& iid, void** out) {
+    HRESULT hr = g_origCoCreateInstance(clsid, outer, ctx, iid, out);
+    if (Same(clsid, kCLSID_DD) || Same(clsid, kCLSID_DD7)) {
+        VideoLog("[coop] resolucao: o jogo criou DirectDraw por COM (resultado 0x%08lX).", static_cast<unsigned long>(hr));
+        if (SUCCEEDED(hr) && out && *out) OnDirectDrawObject(*out, iid);
     }
     return hr;
 }
 
-// Troca uma entrada da tabela de importacao do executavel principal.
-bool PatchImport(const char* dll, const char* function, void* replacement, void** original) {
-    auto* base = reinterpret_cast<uint8_t*>(GetModuleHandleA(nullptr));
-    auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(base);
-    if (!base || dos->e_magic != IMAGE_DOS_SIGNATURE) return false;
-    auto* nt = reinterpret_cast<IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
-    const auto& dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
-    if (!dir.VirtualAddress) return false;
+// ---- Direct3D 9
+struct D3DDisplayMode { UINT width, height, refresh, format; };
 
-    for (auto* imp = reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR*>(base + dir.VirtualAddress); imp->Name; ++imp) {
-        if (lstrcmpiA(reinterpret_cast<const char*>(base + imp->Name), dll) != 0) continue;
-        if (!imp->OriginalFirstThunk) return false;
-        auto* names = reinterpret_cast<IMAGE_THUNK_DATA*>(base + imp->OriginalFirstThunk);
-        auto* slots = reinterpret_cast<IMAGE_THUNK_DATA*>(base + imp->FirstThunk);
-        for (; names->u1.AddressOfData; ++names, ++slots) {
-            if (names->u1.Ordinal & IMAGE_ORDINAL_FLAG) continue;
-            auto* byName = reinterpret_cast<IMAGE_IMPORT_BY_NAME*>(base + names->u1.AddressOfData);
-            if (std::strcmp(reinterpret_cast<const char*>(byName->Name), function) != 0) continue;
-            DWORD old;
-            if (!VirtualProtect(&slots->u1.Function, sizeof(void*), PAGE_READWRITE, &old)) return false;
-            *original = reinterpret_cast<void*>(slots->u1.Function);
-            slots->u1.Function = reinterpret_cast<ULONG_PTR>(replacement);
-            VirtualProtect(&slots->u1.Function, sizeof(void*), old, &old);
-            return true;
-        }
+using Direct3DCreate9_t = void*(WINAPI*)(UINT);
+using EnumAdapterModes_t = HRESULT(WINAPI*)(void*, UINT, UINT, UINT, D3DDisplayMode*);
+using CreateDevice9_t = HRESULT(WINAPI*)(void*, UINT, UINT, HWND, DWORD, UINT* presentParams, void** device);
+using GetAvailTextureMem_t = UINT(WINAPI*)(void*);
+Direct3DCreate9_t    g_origDirect3DCreate9 = nullptr;
+EnumAdapterModes_t   g_origEnumAdapterModes = nullptr;
+CreateDevice9_t      g_origCreateDevice9 = nullptr;
+GetAvailTextureMem_t g_origGetAvailTextureMem = nullptr;
+UINT g_modesSeen = 0, g_maxModeW = 0, g_maxModeH = 0;
+bool g_saw1080 = false;
+
+UINT WINAPI Hook_GetAvailTextureMem(void* self) {
+    UINT real = g_origGetAvailTextureMem(self);
+    VideoLog("[coop] resolucao: Direct3D informou %lu bytes de memoria de textura.", real);
+    return real > kReportedVideoMem ? kReportedVideoMem : real; // acima de 2 GB vira negativo em conta com sinal
+}
+
+HRESULT WINAPI Hook_EnumAdapterModes(void* self, UINT adapter, UINT format, UINT index, D3DDisplayMode* mode) {
+    HRESULT hr = g_origEnumAdapterModes(self, adapter, format, index, mode);
+    if (SUCCEEDED(hr) && mode) {
+        ++g_modesSeen;
+        if (mode->width == 1920 && mode->height == 1080) g_saw1080 = true;
+        if (mode->width * mode->height > g_maxModeW * g_maxModeH) { g_maxModeW = mode->width; g_maxModeH = mode->height; }
     }
-    return false;
+    return hr;
+}
+
+HRESULT WINAPI Hook_CreateDevice9(void* self, UINT adapter, UINT type, HWND window, DWORD flags, UINT* pp, void** device) {
+    g_log("[coop] resolucao: Direct3D enumerou %lu modos para o jogo; 1920x1080=%s; maior %lux%lu.",
+          static_cast<unsigned long>(g_modesSeen), g_saw1080 ? "sim" : "nao",
+          static_cast<unsigned long>(g_maxModeW), static_cast<unsigned long>(g_maxModeH));
+    if (pp) g_log("[coop] resolucao: o jogo esta criando o video em %lux%lu.", static_cast<unsigned long>(pp[0]),
+                  static_cast<unsigned long>(pp[1]));
+    HRESULT hr = g_origCreateDevice9(self, adapter, type, window, flags, pp, device);
+    if (SUCCEEDED(hr) && device && *device && !g_origGetAvailTextureMem) {
+        void* orig = nullptr;
+        if (PatchSlot(VTable(*device), kDev9_GetAvailTextureMem, reinterpret_cast<void*>(&Hook_GetAvailTextureMem), &orig))
+            g_origGetAvailTextureMem = reinterpret_cast<GetAvailTextureMem_t>(orig);
+    }
+    return hr;
+}
+
+void* WINAPI Hook_Direct3DCreate9(UINT sdk) {
+    void* d3d = g_origDirect3DCreate9(sdk);
+    if (d3d && !g_origCreateDevice9) {
+        void *e = nullptr, *c = nullptr;
+        if (PatchSlot(VTable(d3d), kD3D9_EnumAdapterModes, reinterpret_cast<void*>(&Hook_EnumAdapterModes), &e))
+            g_origEnumAdapterModes = reinterpret_cast<EnumAdapterModes_t>(e);
+        if (PatchSlot(VTable(d3d), kD3D9_CreateDevice, reinterpret_cast<void*>(&Hook_CreateDevice9), &c))
+            g_origCreateDevice9 = reinterpret_cast<CreateDevice9_t>(c);
+    }
+    return d3d;
+}
+
+// Hook em uma funcao exportada por uma DLL do sistema (carrega a DLL se preciso).
+template <typename T>
+bool HookExport(const char* dll, const char* function, void* detour, T* original) {
+    HMODULE mod = GetModuleHandleA(dll);
+    bool preloaded = mod != nullptr;
+    if (!mod) mod = LoadLibraryA(dll);
+    void* target = mod ? reinterpret_cast<void*>(GetProcAddress(mod, function)) : nullptr;
+    bool ok = target && MH_CreateHook(target, detour, reinterpret_cast<LPVOID*>(original)) == MH_OK &&
+              MH_EnableHook(target) == MH_OK;
+    g_log("[coop] resolucao: %s!%s %s (%s).", dll, function, ok ? "interceptado" : "NAO interceptado",
+          preloaded ? "ja carregada pelo jogo" : "carregada por nos");
+    return ok;
 }
 
 void LogDesktopMode() {
@@ -295,13 +430,11 @@ void LogDesktopMode() {
 void ApplyVideoMemoryFix(void (*log)(const char* fmt, ...)) {
     g_log = log;
     LogDesktopMode();
-    void* orig = nullptr;
-    if (PatchImport("ddraw.dll", "DirectDrawCreateEx", reinterpret_cast<void*>(&Hook_DirectDrawCreateEx), &orig)) {
-        g_origDirectDrawCreateEx = reinterpret_cast<DirectDrawCreateEx_t>(orig);
-        log("[coop] resolucao: DirectDrawCreateEx interceptado.");
-    } else {
-        log("[coop] resolucao: o executavel nao importa ddraw.dll!DirectDrawCreateEx; correcao de memoria de video inativa.");
-    }
+    MH_Initialize(); // idempotente: o chamador pode inicializar de novo sem problema
+    HookExport("ddraw.dll", "DirectDrawCreate", reinterpret_cast<void*>(&Hook_DirectDrawCreate), &g_origDirectDrawCreate);
+    HookExport("ddraw.dll", "DirectDrawCreateEx", reinterpret_cast<void*>(&Hook_DirectDrawCreateEx), &g_origDirectDrawCreateEx);
+    HookExport("ole32.dll", "CoCreateInstance", reinterpret_cast<void*>(&Hook_CoCreateInstance), &g_origCoCreateInstance);
+    HookExport("d3d9.dll", "Direct3DCreate9", reinterpret_cast<void*>(&Hook_Direct3DCreate9), &g_origDirect3DCreate9);
 }
 
 void ApplyDpiAwareness(void (*log)(const char* fmt, ...)) {

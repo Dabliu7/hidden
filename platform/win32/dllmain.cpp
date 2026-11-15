@@ -203,7 +203,8 @@ void InstallHooks() {
         Log("[coop] executavel nao suportado (requer gta_sa.exe 1.0 US); coop desativado.");
         return;
     }
-    if (MH_Initialize() != MH_OK) return;
+    MH_STATUS init = MH_Initialize();
+    if (init != MH_OK && init != MH_ERROR_ALREADY_INITIALIZED) return;
     coop::win32::menu::Install(&Log);
     if (MH_CreateHook(reinterpret_cast<LPVOID>(addr::CGame_Process),
                       reinterpret_cast<LPVOID>(&Hook_GameProcess),

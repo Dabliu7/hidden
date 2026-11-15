@@ -53,10 +53,12 @@ gta_sa.exe -coop-connect 192.168.0.10
 
 A DLL também aplica duas correções para Windows moderno, em qualquer versão do executável:
 
-- **Resolução** — declara o jogo como *DPI-aware* e intercepta a consulta de memória de vídeo por
-  DirectDraw, que estoura em placas modernas e faz o jogo esconder as resoluções altas da lista.
+- **Resolução** — declara o jogo como *DPI-aware* e limita a 1 GB a memória de vídeo informada por
+  DirectDraw/Direct3D, cujo valor estoura em placas modernas e faz o jogo esconder resoluções altas
+  (em validação: o `coop.log` registra o que o sistema informou e os modos enumerados).
 - **Mouse** — pede o mouse ao DirectInput em modo não-exclusivo, readquire-o quando é perdido e, se
-  o DirectInput entregar o mouse "mudo", passa a ler movimento e botões direto do Windows (sem a roda).
+  o DirectInput entregar o mouse "mudo", passa a ler movimento e botões direto do Windows (sem a
+  roda). Nos menus o cursor fica livre; durante a partida ele é preso ao centro para girar a câmera.
 
 Porta padrão: **7777/UDP**. O arquivo `coop.log` na pasta do jogo registra o que aconteceu.
 
