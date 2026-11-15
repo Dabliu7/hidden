@@ -19,6 +19,7 @@
 #include "Runtime.h"
 #include "win32/Addresses.h"
 #include "win32/Menu.h"
+#include "win32/ScriptCommand.h"
 
 namespace {
 
@@ -59,6 +60,66 @@ T Read(uintptr_t a) {
     return v;
 }
 
+template <typename T>
+void Write(uintptr_t a, T v) { std::memcpy(reinterpret_cast<void*>(a), &v, sizeof(T)); }
+
+// ---------------------------------------------------------------------------
+// Jogadores remotos (MVP): um ped comum com a aparencia do CJ por slot, levado
+// a cada frame para a posicao interpolada. Ainda sem animacao/armas - o ped
+// "desliza". CPlayerPed de verdade + troca de contexto vem depois (SAD 4.2).
+// ---------------------------------------------------------------------------
+struct RemotePed {
+    int32_t handle = -1;
+    DWORD   lastFresh = 0;
+};
+RemotePed g_remotePeds[kMaxPlayers];
+
+void DestroyRemotePed(int slot) {
+    RemotePed& rp = g_remotePeds[slot];
+    if (rp.handle == -1) return;
+    Log("[coop] removendo ped do jogador %d.", slot + 1);
+    coop::win32::ScriptCommand(0x009B).Int(rp.handle).Run(); // DELETE_CHAR
+    rp.handle = -1;
+}
+
+void UpdateRemotePeds(DWORD now) {
+    auto& rt = Runtime::Get();
+    for (int slot = 0; slot < kMaxPlayers; ++slot) {
+        RemotePed& rp = g_remotePeds[slot];
+        if (!rt.Active() || slot == rt.LocalSlot()) { DestroyRemotePed(slot); continue; }
+
+        auto r = rt.SampleRemotePlayer(static_cast<uint8_t>(slot));
+        using Mode = SnapshotBuffer::Mode;
+        if (r.mode == Mode::Interpolated || r.mode == Mode::Extrapolated) rp.lastFresh = now;
+        if (r.mode == Mode::Empty || now - rp.lastFresh > 5000) { DestroyRemotePed(slot); continue; }
+
+        const Vec3& p = r.state.pos;
+        if (rp.handle == -1) {
+            Log("[coop] criando ped do jogador %d em (%.1f, %.1f, %.1f).", slot + 1, p.x, p.y, p.z);
+            // CREATE_CHAR pedtype=4 (civil) modelo=0 (CJ, sempre carregado) x y z -> local 0
+            rp.handle = coop::win32::ScriptCommand(0x009A).Int(4).Int(0).Float(p.x).Float(p.y).Float(p.z).Out(0).Run().Result(0);
+            Log("[coop] ped criado, handle=%d.", rp.handle);
+            if (rp.handle <= 0) { rp.handle = -1; continue; }
+        }
+
+        auto ped = reinterpret_cast<uintptr_t(__cdecl*)(int)>(addr::CPools_GetPed)(rp.handle);
+        if (!ped) { rp.handle = -1; continue; } // o jogo removeu o ped; recria no proximo frame
+        auto mat = Read<uintptr_t>(ped + addr::CPlaceable_m_matrix);
+        if (!mat) continue;
+
+        Write(mat + addr::CMatrix_pos, p.x);
+        Write(mat + addr::CMatrix_pos + 4, p.y);
+        Write(mat + addr::CMatrix_pos + 8, p.z);
+        constexpr float kStepHz = 50.0f; // m/s -> metros por passo de 1/50 s
+        Write(ped + addr::CPhysical_m_vecMove, r.state.vel.x / kStepHz);
+        Write(ped + addr::CPhysical_m_vecMove + 4, r.state.vel.y / kStepHz);
+        Write(ped + addr::CPhysical_m_vecMove + 8, 0.0f); // sem gravidade acumulada entre correcoes
+        float heading = 2.0f * std::atan2(r.state.rot.z, r.state.rot.w);
+        Write(ped + addr::CPed_m_fCurrentRot, heading);
+        Write(ped + addr::CPed_m_fAimingRot, heading);
+    }
+}
+
 // Le o CPlayerPed local e converte para o formato neutro de rede.
 bool ReadLocalPlayer(PlayerSnapshot& s) {
     auto ped = Read<uintptr_t>(addr::CWorld_Players);
@@ -84,6 +145,7 @@ void ShowHelp(const char* text) {
     Log("[coop] exibindo mensagem na tela: %s", text);
     reinterpret_cast<void(__cdecl*)(const char*, bool, bool, bool)>(addr::CHud_SetHelpMessage)(
         text, false, false, false);
+    Log("[coop] mensagem exibida.");
 }
 
 void StartHosting() {
@@ -112,6 +174,7 @@ void __cdecl Hook_GameProcess() {
     if (!started) {
         // Fora do loader lock: aqui ja e seguro abrir sockets.
         started = true;
+        Runtime::Get().SetStatusSink([](const char* msg) { ShowHelp(msg); });
         StartSessionFromCommandLine();
     }
 
@@ -122,6 +185,7 @@ void __cdecl Hook_GameProcess() {
     rt.Frame(now);
 
     g_origGameProcess();
+    UpdateRemotePeds(now);
 
     static DWORD lastSend = 0;
     if (rt.Active() && now - lastSend >= 50) { // 20 Hz

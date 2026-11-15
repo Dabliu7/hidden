@@ -41,7 +41,8 @@ MoonLoader**.
 
 No menu principal aparece **Cooperativo (1-4 Jogadores)**, logo abaixo de "Iniciar Jogo". Entrar por
 ela abre a tela nativa de Novo Jogo/Carregar e, ao começar a partida, abre a sala como host
-(experimental: jogadores remotos ainda não são desenhados no mundo — milestone M1).
+Quem se conecta aparece no mundo como um segundo CJ que acompanha a posição do outro jogador
+(experimental: ainda sem animação, armas ou veículos — o personagem "desliza").
 
 Entrar na sala de outra pessoa ainda é por parâmetro, assim como hospedar sem passar pelo menu:
 

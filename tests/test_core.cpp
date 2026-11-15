@@ -2,6 +2,7 @@
 #include <cmath>
 #include <cstdio>
 
+#include "Runtime.h"
 #include "net/Protocol.h"
 #include "net/Transport.h"
 #include "script/HandleMap.h"
@@ -132,6 +133,37 @@ static void TestLoopbackTransport() {
     CHECK(got.slot == 1 && std::fabs(got.pos.y - 200.0f) < 0.02f);
 }
 
+// Host + cliente completos: atribuicao de slot e estado remoto nos dois
+// sentidos, com relogios locais deliberadamente diferentes.
+static void TestRuntimeSession() {
+    Runtime host, client;
+    int hostMsgs = 0, clientMsgs = 0;
+    host.SetStatusSink([&](const char*) { ++hostMsgs; });
+    client.SetStatusSink([&](const char*) { ++clientMsgs; });
+    CHECK(host.StartHost(47811));
+    CHECK(client.StartClient("127.0.0.1", 47811));
+
+    bool hostSees = false, clientSees = false;
+    for (uint32_t i = 0; i < 3000 && !(hostSees && clientSees); ++i) {
+        uint32_t hostNow = 1000000 + i * 10, clientNow = 5000 + i * 10;
+        host.Frame(hostNow);
+        client.Frame(clientNow);
+        PlayerSnapshot h, c;
+        h.slot = host.LocalSlot();   h.timeMs = hostNow;   h.pos = {10, 20, 30};
+        c.slot = client.LocalSlot(); c.timeMs = clientNow; c.pos = {-5, 6, 7};
+        host.SubmitLocalPlayer(h);
+        client.SubmitLocalPlayer(c);
+        auto a = host.SampleRemotePlayer(1);
+        auto b = client.SampleRemotePlayer(0);
+        hostSees = a.mode == SnapshotBuffer::Mode::Interpolated && std::fabs(a.state.pos.x + 5.0f) < 0.02f;
+        clientSees = b.mode == SnapshotBuffer::Mode::Interpolated && std::fabs(b.state.pos.y - 20.0f) < 0.02f;
+    }
+    CHECK(client.LocalSlot() == 1);
+    CHECK(hostSees);
+    CHECK(clientSees);
+    CHECK(hostMsgs == 1 && clientMsgs == 1); // "jogador entrou" / "conectado"
+}
+
 int main() {
     TestSnapshotRoundTrip();
     TestTruncatedPacketIsRejected();
@@ -139,6 +171,7 @@ int main() {
     TestOpcodeTable();
     TestHandleMap();
     TestLoopbackTransport();
+    TestRuntimeSession();
     std::printf(g_failures ? "%d falha(s)\n" : "todos os testes passaram\n", g_failures);
     return g_failures ? 1 : 0;
 }

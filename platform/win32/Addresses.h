@@ -21,6 +21,14 @@ constexpr uintptr_t FrontEndMenuManager          = 0xBA6748;
 constexpr uintptr_t CMenuManager_m_nCurrentRow   = 0x54;     // int: linha selecionada
 constexpr uintptr_t CMenuManager_m_nCurrentPage  = 0x15D;    // uint8: pagina atual
 
+// Scripts
+constexpr uintptr_t CRunningScript_ProcessOneCommand = 0x469EB0; // int8 __thiscall ()
+constexpr uintptr_t CRunningScript_size         = 0xE0;
+constexpr uintptr_t CRunningScript_m_pBaseIP    = 0x10;
+constexpr uintptr_t CRunningScript_m_pCurrentIP = 0x14;
+constexpr uintptr_t CRunningScript_m_aLocalVars = 0x3C; // int[32]
+constexpr uintptr_t CPools_GetPed               = 0x404910; // CPed* __cdecl (int handle)
+
 constexpr uintptr_t CWorld_Players      = 0xB7CD98; // CPlayerInfo[2]; +0 = CPlayerPed*
 
 // CPed / CPhysical / CPlaceable (x86)
@@ -30,5 +38,6 @@ constexpr uintptr_t CPhysical_m_vecMove   = 0x44;  // CVector, metros por passo 
 constexpr uintptr_t CPed_m_fHealth        = 0x540;
 constexpr uintptr_t CPed_m_fArmour        = 0x548;
 constexpr uintptr_t CPed_m_fCurrentRot    = 0x558; // heading em radianos
+constexpr uintptr_t CPed_m_fAimingRot     = 0x55C; // heading alvo
 
 } // namespace coop::win32::addr
