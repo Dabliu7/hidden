@@ -20,6 +20,7 @@
 #include "win32/Addresses.h"
 #include "win32/Menu.h"
 #include "win32/ScriptCommand.h"
+#include "win32/SystemFixes.h"
 
 namespace {
 
@@ -227,13 +228,17 @@ extern "C" HRESULT WINAPI Coop_DirectInput8Create(HINSTANCE inst, DWORD version,
                 reinterpret_cast<void*>(GetProcAddress(real, "DirectInput8Create")));
         if (!g_realDirectInput8Create) return E_FAIL;
     }
-    return g_realDirectInput8Create(inst, version, riid, out, outer);
+    HRESULT hr = g_realDirectInput8Create(inst, version, riid, out, outer);
+    if (SUCCEEDED(hr) && out) coop::win32::fixes::InstallMouseFix(*out, &Log);
+    return hr;
 }
 
 BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(inst);
         // Sob loader lock: apenas patch de memoria. Nada de LoadLibrary/sockets aqui.
+        // As correcoes de sistema valem para qualquer versao do executavel.
+        coop::win32::fixes::ApplyDpiAwareness(&Log);
         InstallHooks();
     }
     return TRUE;

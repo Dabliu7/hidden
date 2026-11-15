@@ -1,0 +1,13 @@
+#pragma once
+
+namespace coop::win32::fixes {
+
+// Resolucao: declara o processo como DPI-aware. Deve rodar antes de o jogo
+// criar a janela (chamado no DllMain).
+void ApplyDpiAwareness(void (*log)(const char* fmt, ...));
+
+// Mouse: readquire automaticamente o dispositivo quando o DirectInput perde o
+// foco. `directInput8` e o objeto devolvido por DirectInput8Create.
+void InstallMouseFix(void* directInput8, void (*log)(const char* fmt, ...));
+
+} // namespace coop::win32::fixes
