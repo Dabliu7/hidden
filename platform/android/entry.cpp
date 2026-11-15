@@ -14,12 +14,15 @@
 #include <android/log.h>
 #include <dlfcn.h>
 #include <jni.h>
+#include <signal.h>
 #include <sys/syscall.h>
 #include <time.h>
+#include <ucontext.h>
 #include <unistd.h>
 
 #include <cmath>
 #include <cstdarg>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -33,6 +36,8 @@ using namespace coop;
 
 std::string g_dataDir; // /storage/emulated/0/Android/data/<pacote>/files
 
+std::string g_pendingLog; // linhas emitidas antes de a pasta de dados existir
+
 void Log(const char* fmt, ...) {
     char buf[512];
     va_list ap;
@@ -41,11 +46,19 @@ void Log(const char* fmt, ...) {
     va_end(ap);
     __android_log_write(ANDROID_LOG_INFO, "GTASA_Coop", buf);
     if (g_dataDir.empty()) return;
-    if (FILE* f = fopen((g_dataDir + "/coop.log").c_str(), "a")) {
-        fputs(buf, f);
-        fputc('\n', f);
-        fclose(f);
+    // No JNI_OnLoad a pasta do app pode ainda nao existir: acumula e grava depois.
+    FILE* f = fopen((g_dataDir + "/coop.log").c_str(), "a");
+    if (!f) {
+        if (g_pendingLog.size() < 16384) g_pendingLog.append(buf).push_back('\n');
+        return;
     }
+    if (!g_pendingLog.empty()) {
+        fputs(g_pendingLog.c_str(), f);
+        g_pendingLog.clear();
+    }
+    fputs(buf, f);
+    fputc('\n', f);
+    fclose(f);
 }
 
 // O diretorio externo do app e gravavel sem permissao e acessivel pelo usuario.
@@ -68,12 +81,10 @@ uint32_t NowMs() {
 // ---- Funcoes exportadas pela libGTASA.so (nomes C++ "mangled")
 struct CVector { float x, y, z; };
 using FindPlayerPed_t     = void* (*)(int);
-using FindPlayerCoors_t   = CVector (*)(int);
 using FindPlayerSpeed_t   = const CVector* (*)(int);
 using FindPlayerHeading_t = float (*)(int);
 
 FindPlayerPed_t     g_findPlayerPed = nullptr;
-FindPlayerCoors_t   g_findPlayerCoors = nullptr;
 FindPlayerSpeed_t   g_findPlayerSpeed = nullptr;
 FindPlayerHeading_t g_findPlayerHeading = nullptr;
 
@@ -106,21 +117,107 @@ void StartSessionFromConfig() {
     }
 }
 
+// Layout de CPlaceable (base de todo CEntity): vtable, transformacao simples
+// {CVector pos; float heading}, ponteiro para a matriz completa (pos em +0x30).
+constexpr size_t kSimplePos = sizeof(void*);
+constexpr size_t kMatrixPtr = sizeof(void*) + 16;
+constexpr size_t kMatrixPos = 0x30;
+
+template <typename T>
+T ReadAt(const void* base, size_t offset) {
+    T v;
+    std::memcpy(&v, static_cast<const char*>(base) + offset, sizeof(T));
+    return v;
+}
+
+void InstallCrashHandler();
+
+bool g_traceSteps = true; // registra cada etapa da primeira leitura, para localizar um crash
+
 bool ReadLocalPlayer(PlayerSnapshot& s) {
-    if (!g_findPlayerPed || !g_findPlayerCoors || !g_findPlayerPed(-1)) return false;
-    CVector p = g_findPlayerCoors(-1);
-    s.pos = {p.x, p.y, p.z};
+    if (!g_findPlayerPed) return false;
+    void* ped = g_findPlayerPed(-1);
+    if (!ped) return false;
+    bool trace = g_traceSteps;
+    g_traceSteps = false;
+    if (trace) {
+        InstallCrashHandler(); // o jogo pode ter registrado o proprio tratador depois do nosso
+        Log("[coop] etapa 1: jogador=%p; lendo posicao.", ped);
+    }
+
+    auto* matrix = ReadAt<const char*>(ped, kMatrixPtr);
+    if (matrix && (reinterpret_cast<uintptr_t>(matrix) & 3) == 0 && reinterpret_cast<uintptr_t>(matrix) > 0x10000) {
+        s.pos = {ReadAt<float>(matrix, kMatrixPos), ReadAt<float>(matrix, kMatrixPos + 4),
+                 ReadAt<float>(matrix, kMatrixPos + 8)};
+    } else {
+        s.pos = {ReadAt<float>(ped, kSimplePos), ReadAt<float>(ped, kSimplePos + 4), ReadAt<float>(ped, kSimplePos + 8)};
+    }
+    if (trace) Log("[coop] etapa 2: posicao (%.1f, %.1f, %.1f), matriz=%p; lendo velocidade.", s.pos.x, s.pos.y,
+                   s.pos.z, matrix);
+
     if (g_findPlayerSpeed) {
         if (const CVector* v = g_findPlayerSpeed(-1)) {
             constexpr float kStepHz = 50.0f; // unidades do jogo (m por passo de 1/50 s) -> m/s
             s.vel = {v->x * kStepHz, v->y * kStepHz, v->z * kStepHz};
         }
     }
+    if (trace) Log("[coop] etapa 3: velocidade ok; lendo direcao.");
     if (g_findPlayerHeading) {
         float h = g_findPlayerHeading(-1);
         s.rot = {0, 0, std::sin(h * 0.5f), std::cos(h * 0.5f)};
     }
+    if (trace) Log("[coop] etapa 4: leitura do jogador concluida.");
     return true;
+}
+
+// ---- Diagnostico de crash: registra o sinal e ONDE ocorreu (modulo + deslocamento).
+struct sigaction g_oldActions[32];
+
+void CrashHandler(int sig, siginfo_t* info, void* context) {
+    static volatile int once = 0;
+    if (!once) {
+        once = 1;
+        uintptr_t pc = 0, lr = 0;
+        auto* uc = static_cast<ucontext_t*>(context);
+#if defined(__aarch64__)
+        pc = uc->uc_mcontext.pc;
+        lr = uc->uc_mcontext.regs[30];
+#elif defined(__arm__)
+        pc = uc->uc_mcontext.arm_pc;
+        lr = uc->uc_mcontext.arm_lr;
+#else
+        (void)uc;
+#endif
+        Log("[coop] CRASH sinal=%d endereco-acessado=%p", sig, info ? info->si_addr : nullptr);
+        for (int i = 0; i < 2; ++i) {
+            uintptr_t addr = i == 0 ? pc : lr;
+            Dl_info dl{};
+            if (addr && dladdr(reinterpret_cast<void*>(addr), &dl) && dl.dli_fname) {
+                const char* name = std::strrchr(dl.dli_fname, '/');
+                Log("[coop] CRASH %s: %s+0x%lx (%s)", i == 0 ? "pc" : "lr", name ? name + 1 : dl.dli_fname,
+                    static_cast<unsigned long>(addr - reinterpret_cast<uintptr_t>(dl.dli_fbase)),
+                    dl.dli_sname ? dl.dli_sname : "?");
+            } else {
+                Log("[coop] CRASH %s: %p (modulo desconhecido)", i == 0 ? "pc" : "lr", reinterpret_cast<void*>(addr));
+            }
+        }
+    }
+    // Devolve ao tratador anterior (o do jogo / do sistema) para o encerramento normal.
+    if (sig >= 0 && sig < 32) sigaction(sig, &g_oldActions[sig], nullptr);
+    raise(sig);
+}
+
+void InstallCrashHandler() {
+    struct sigaction sa{};
+    sa.sa_sigaction = &CrashHandler;
+    sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+    sigemptyset(&sa.sa_mask);
+    for (int sig : {SIGSEGV, SIGBUS, SIGILL, SIGABRT, SIGFPE}) {
+        struct sigaction current{};
+        sigaction(sig, nullptr, &current);
+        if (current.sa_sigaction == &CrashHandler) continue; // ja e o nosso: nao encadear em si mesmo
+        sigaction(sig, &sa, &g_oldActions[sig]);
+    }
 }
 
 // Chamado a partir das funcoes de video que o jogo executa a cada quadro.
@@ -147,11 +244,17 @@ void Tick() {
     }
     if (inGame && !started) {
         started = true;
+        Log("[coop] etapa 5: iniciando sessao a partir do coop.txt.");
         rt.SetStatusSink([](const char* msg) { Log("[coop] %s", msg); });
         StartSessionFromConfig();
     }
 
     rt.Frame(now);
+    static bool framed = false;
+    if (inGame && !framed) {
+        framed = true;
+        Log("[coop] etapa 6: primeiro quadro em jogo concluido.");
+    }
 
     if (inGame && rt.Active() && now - lastSend >= 50) { // 20 Hz
         lastSend = now;
@@ -197,13 +300,13 @@ extern "C" JNIEXPORT jint JNI_OnLoad(JavaVM*, void*) {
     Log("[coop] libGTASA_Coop carregada (protocolo %u, %s).", static_cast<unsigned>(kProtocolVersion),
         sizeof(void*) == 8 ? "arm64" : "arm32");
 
+    InstallCrashHandler();
     void* lib = dlopen("libGTASA.so", RTLD_NOW | RTLD_NOLOAD);
     if (!lib) {
         Log("[coop] libGTASA.so nao esta carregada; coop desativado.");
         return JNI_VERSION_1_6;
     }
     Resolve(lib, "_Z13FindPlayerPedi", &g_findPlayerPed);
-    Resolve(lib, "_Z15FindPlayerCoorsi", &g_findPlayerCoors);
     Resolve(lib, "_Z15FindPlayerSpeedi", &g_findPlayerSpeed);
     Resolve(lib, "_Z17FindPlayerHeadingi", &g_findPlayerHeading);
 
