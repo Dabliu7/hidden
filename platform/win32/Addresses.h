@@ -18,6 +18,7 @@ constexpr uintptr_t CHud_SetHelpMessage = 0x588BE0; // void __cdecl (const char*
 // Front-end
 constexpr uintptr_t CMenuManager_aScreens        = 0x8CE008; // 44 paginas de 0xE2 bytes
 constexpr uintptr_t FrontEndMenuManager          = 0xBA6748;
+constexpr uintptr_t CMenuManager_m_bMenuActive   = 0x5C;     // uint8: menu aberto (0xBA67A4)
 constexpr uintptr_t CMenuManager_m_nCurrentRow   = 0x54;     // int: linha selecionada
 constexpr uintptr_t CMenuManager_m_nCurrentPage  = 0x15D;    // uint8: pagina atual
 

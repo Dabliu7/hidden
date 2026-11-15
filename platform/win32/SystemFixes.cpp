@@ -113,6 +113,20 @@ bool WeAreForeground(HWND* window) {
     return true;
 }
 
+// Em partida o cursor e preso ao centro (para medir o giro da camera); em
+// menu ele precisa ficar livre. Fonte preferida: o indicador "menu aberto" do
+// proprio jogo, quando a versao do executavel e conhecida. Sem ele, usamos o
+// modo pedido ao DirectInput, que nem sempre muda ao entrar na partida.
+const unsigned char* g_menuActiveFlag = nullptr;
+bool g_wasGameplay = false;
+
+bool InGameplay() {
+    bool gameplay = g_menuActiveFlag ? (*g_menuActiveFlag == 0) : g_gameplay;
+    if (gameplay && !g_wasGameplay) g_skipDelta = true;
+    g_wasGameplay = gameplay;
+    return gameplay;
+}
+
 // Plano B: se o DirectInput entrega o mouse "mudo" (sem movimento e sem
 // botoes enquanto o Windows ve o mouse sendo usado), passamos a preencher o
 // estado com as APIs comuns do Windows. A roda do mouse nao e coberta.
@@ -122,7 +136,7 @@ int   g_diAlive = 0;       // leituras em que o DirectInput trouxe algo
 int   g_deadEvidence = 0;  // leituras mudas com o mouse em uso segundo o Windows
 POINT g_lastCursor = {};
 DWORD g_calls = 0, g_failures = 0, g_lastReport = 0;
-int   g_reports = 6;
+int   g_reports = 12;
 
 void FillFromWindows(HWND window, MouseState* st) {
     RECT rc;
@@ -132,7 +146,7 @@ void FillFromWindows(HWND window, MouseState* st) {
     center.y = (rc.bottom - rc.top) / 2;
     ClientToScreen(window, &center);
     st->x = st->y = st->wheel = 0;
-    if (g_gameplay) {
+    if (InGameplay()) {
         if (!g_skipDelta) {
             st->x = pos.x - center.x;
             st->y = pos.y - center.y;
@@ -175,7 +189,10 @@ HRESULT WINAPI Hook_GetDeviceState(void* self, DWORD size, void* data) {
                 osActive = osActive || pos.x != g_lastCursor.x || pos.y != g_lastCursor.y;
                 g_lastCursor = pos;
             }
-            if (osActive && !diActive && g_diAlive == 0 && ++g_deadEvidence > 30) {
+            // 30 leituras SEGUIDAS mudas com o mouse em uso; uma leitura isolada com
+            // dados (comum durante o carregamento) nao prova que o DirectInput funciona.
+            if (diActive) g_deadEvidence = 0;
+            if (osActive && !diActive && ++g_deadEvidence > 30) {
                 g_fallback = true;
                 g_log("[coop] mouse: DirectInput mudo (%lu leituras, %lu falhas); usando leitura direta do Windows.",
                       g_calls, g_failures);
@@ -191,8 +208,8 @@ HRESULT WINAPI Hook_GetDeviceState(void* self, DWORD size, void* data) {
     if (g_reports > 0 && now - g_lastReport > 5000) {
         g_lastReport = now;
         --g_reports;
-        g_log("[coop] mouse: leituras=%lu falhas=%lu com-dados=%d plano-B=%d.", g_calls, g_failures, g_diAlive,
-              g_fallback ? 1 : 0);
+        g_log("[coop] mouse: leituras=%lu falhas=%lu com-dados=%d plano-B=%d em-partida=%d.", g_calls, g_failures,
+              g_diAlive, g_fallback ? 1 : 0, g_wasGameplay ? 1 : 0);
     }
     return hr;
 }
@@ -270,6 +287,7 @@ struct SlotTable {
 };
 SlotTable g_vidMemHooks, g_queryHooks;
 int g_videoLogs = 10;
+int g_memoryLogs = 4;
 
 void VideoLog(const char* fmt, unsigned long a = 0, unsigned long b = 0, unsigned long c = 0) {
     if (g_videoLogs <= 0) return;
@@ -283,8 +301,11 @@ HRESULT WINAPI Hook_GetAvailableVidMem(void* self, void* caps, DWORD* total, DWO
     using Fn = HRESULT(WINAPI*)(void*, void*, DWORD*, DWORD*);
     auto orig = reinterpret_cast<Fn>(g_vidMemHooks.Find(self));
     HRESULT hr = orig ? orig(self, caps, total, free) : S_OK;
-    VideoLog("[coop] resolucao: DirectDraw informou memoria total=%lu livre=%lu (resultado 0x%08lX); repassando 1 GB.",
-             total ? *total : 0, free ? *free : 0, static_cast<unsigned long>(hr));
+    if (g_memoryLogs > 0) {
+        --g_memoryLogs;
+        g_log("[coop] resolucao: DirectDraw informou memoria total=%lu livre=%lu (resultado 0x%08lX); repassando 1 GB.",
+              total ? *total : 0ul, free ? *free : 0ul, static_cast<unsigned long>(hr));
+    }
     if (total) *total = kReportedVideoMem;
     if (free) *free = kReportedVideoMem;
     return S_OK;
@@ -355,7 +376,11 @@ bool g_saw1080 = false;
 
 UINT WINAPI Hook_GetAvailTextureMem(void* self) {
     UINT real = g_origGetAvailTextureMem(self);
-    VideoLog("[coop] resolucao: Direct3D informou %lu bytes de memoria de textura.", real);
+    static int logs = 2;
+    if (logs > 0) {
+        --logs;
+        g_log("[coop] resolucao: Direct3D informou %lu bytes de memoria de textura.", static_cast<unsigned long>(real));
+    }
     return real > kReportedVideoMem ? kReportedVideoMem : real; // acima de 2 GB vira negativo em conta com sinal
 }
 
@@ -436,6 +461,8 @@ void ApplyVideoMemoryFix(void (*log)(const char* fmt, ...)) {
     HookExport("ole32.dll", "CoCreateInstance", reinterpret_cast<void*>(&Hook_CoCreateInstance), &g_origCoCreateInstance);
     HookExport("d3d9.dll", "Direct3DCreate9", reinterpret_cast<void*>(&Hook_Direct3DCreate9), &g_origDirect3DCreate9);
 }
+
+void SetMenuActiveFlag(const unsigned char* flag) { g_menuActiveFlag = flag; }
 
 void ApplyDpiAwareness(void (*log)(const char* fmt, ...)) {
     HMODULE user32 = GetModuleHandleA("user32.dll");
