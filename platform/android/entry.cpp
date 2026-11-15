@@ -82,11 +82,9 @@ uint32_t NowMs() {
 struct CVector { float x, y, z; };
 using FindPlayerPed_t     = void* (*)(int);
 using FindPlayerSpeed_t   = const CVector* (*)(int);
-using FindPlayerHeading_t = float (*)(int);
 
 FindPlayerPed_t     g_findPlayerPed = nullptr;
 FindPlayerSpeed_t   g_findPlayerSpeed = nullptr;
-FindPlayerHeading_t g_findPlayerHeading = nullptr;
 
 template <typename T>
 void Resolve(void* lib, const char* mangled, T* out) {
@@ -161,9 +159,12 @@ bool ReadLocalPlayer(PlayerSnapshot& s) {
             s.vel = {v->x * kStepHz, v->y * kStepHz, v->z * kStepHz};
         }
     }
-    if (trace) Log("[coop] etapa 3: velocidade ok; lendo direcao.");
-    if (g_findPlayerHeading) {
-        float h = g_findPlayerHeading(-1);
+    if (trace) Log("[coop] etapa 3: velocidade ok; calculando direcao pela matriz.");
+    // Direcao a partir do vetor "frente" da matriz (segunda linha, +0x10).
+    // FindPlayerHeading(-1) falha quando chamada fora da thread de jogo.
+    if (matrix && (reinterpret_cast<uintptr_t>(matrix) & 3) == 0 && reinterpret_cast<uintptr_t>(matrix) > 0x10000) {
+        float fx = ReadAt<float>(matrix, 0x10), fy = ReadAt<float>(matrix, 0x14);
+        float h = std::atan2(-fx, fy);
         s.rot = {0, 0, std::sin(h * 0.5f), std::cos(h * 0.5f)};
     }
     if (trace) Log("[coop] etapa 4: leitura do jogador concluida.");
@@ -308,7 +309,6 @@ extern "C" JNIEXPORT jint JNI_OnLoad(JavaVM*, void*) {
     }
     Resolve(lib, "_Z13FindPlayerPedi", &g_findPlayerPed);
     Resolve(lib, "_Z15FindPlayerSpeedi", &g_findPlayerSpeed);
-    Resolve(lib, "_Z17FindPlayerHeadingi", &g_findPlayerHeading);
 
     int clear = coop::android::HookImport("libGTASA.so", "glClear", reinterpret_cast<void*>(&Hook_glClear),
                                           reinterpret_cast<void**>(&g_origGlClear));
