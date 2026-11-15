@@ -3,6 +3,9 @@
 #include "win32/SystemFixes.h"
 
 #include <windows.h>
+#include <unknwn.h>
+
+#include <cstdint>
 
 #include <cstring>
 
@@ -87,16 +90,94 @@ HRESULT WINAPI Hook_Acquire(void* self) {
     return hr;
 }
 
+// Layout de DIMOUSESTATE / DIMOUSESTATE2 (os 16 primeiros bytes sao iguais).
+struct MouseState {
+    LONG x, y, wheel;
+    BYTE buttons[4];
+};
+
+bool WeAreForeground(HWND* window) {
+    HWND fg = GetForegroundWindow();
+    DWORD pid = 0;
+    if (!fg || !GetWindowThreadProcessId(fg, &pid) || pid != GetCurrentProcessId()) return false;
+    *window = fg;
+    return true;
+}
+
+// Plano B: se o DirectInput entrega o mouse "mudo" (sem movimento e sem
+// botoes enquanto o Windows ve o mouse sendo usado), passamos a preencher o
+// estado com as APIs comuns do Windows. A roda do mouse nao e coberta.
+bool  g_fallback = false;
+int   g_diAlive = 0;       // leituras em que o DirectInput trouxe algo
+int   g_deadEvidence = 0;  // leituras mudas com o mouse em uso segundo o Windows
+POINT g_lastCursor = {};
+DWORD g_calls = 0, g_failures = 0, g_lastReport = 0;
+int   g_reports = 6;
+
+void FillFromWindows(HWND window, MouseState* st) {
+    RECT rc;
+    POINT center = {0, 0}, pos;
+    if (!GetClientRect(window, &rc) || !GetCursorPos(&pos)) return;
+    center.x = (rc.right - rc.left) / 2;
+    center.y = (rc.bottom - rc.top) / 2;
+    ClientToScreen(window, &center);
+    st->x = pos.x - center.x;
+    st->y = pos.y - center.y;
+    st->wheel = 0;
+    st->buttons[0] = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) ? 0x80 : 0;
+    st->buttons[1] = (GetAsyncKeyState(VK_RBUTTON) & 0x8000) ? 0x80 : 0;
+    st->buttons[2] = (GetAsyncKeyState(VK_MBUTTON) & 0x8000) ? 0x80 : 0;
+    st->buttons[3] = 0;
+    SetCursorPos(center.x, center.y); // proxima leitura mede o deslocamento a partir do centro
+}
+
 HRESULT WINAPI Hook_GetDeviceState(void* self, DWORD size, void* data) {
     HRESULT hr = g_origGetDeviceState(self, size, data);
-    if (self == g_mouse && FAILED(hr)) {
-        if (SUCCEEDED(g_origAcquire(self))) {
-            hr = g_origGetDeviceState(self, size, data);
-            if (!g_loggedRecovery) {
-                g_loggedRecovery = true;
-                g_log("[coop] mouse: dispositivo readquirido apos perda de foco.");
+    if (self != g_mouse) return hr;
+
+    if (FAILED(hr) && SUCCEEDED(g_origAcquire(self))) {
+        hr = g_origGetDeviceState(self, size, data);
+        if (!g_loggedRecovery) {
+            g_loggedRecovery = true;
+            g_log("[coop] mouse: dispositivo readquirido apos perda de foco.");
+        }
+    }
+    ++g_calls;
+    if (FAILED(hr)) ++g_failures;
+
+    HWND window = nullptr;
+    if (data && size >= sizeof(MouseState) && WeAreForeground(&window)) {
+        auto* st = static_cast<MouseState*>(data);
+        if (FAILED(hr)) std::memset(data, 0, size);
+        bool diActive = SUCCEEDED(hr) && (st->x || st->y || st->wheel || st->buttons[0] || st->buttons[1] ||
+                                          st->buttons[2]);
+        if (diActive) ++g_diAlive;
+
+        if (!g_fallback) {
+            POINT pos;
+            bool osActive = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) || (GetAsyncKeyState(VK_RBUTTON) & 0x8000);
+            if (GetCursorPos(&pos)) {
+                osActive = osActive || pos.x != g_lastCursor.x || pos.y != g_lastCursor.y;
+                g_lastCursor = pos;
+            }
+            if (osActive && !diActive && g_diAlive == 0 && ++g_deadEvidence > 30) {
+                g_fallback = true;
+                g_log("[coop] mouse: DirectInput mudo (%lu leituras, %lu falhas); usando leitura direta do Windows.",
+                      g_calls, g_failures);
             }
         }
+        if (g_fallback) {
+            FillFromWindows(window, st);
+            hr = S_OK;
+        }
+    }
+
+    DWORD now = GetTickCount();
+    if (g_reports > 0 && now - g_lastReport > 5000) {
+        g_lastReport = now;
+        --g_reports;
+        g_log("[coop] mouse: leituras=%lu falhas=%lu com-dados=%d plano-B=%d.", g_calls, g_failures, g_diAlive,
+              g_fallback ? 1 : 0);
     }
     return hr;
 }
@@ -123,7 +204,105 @@ HRESULT WINAPI Hook_CreateDevice(void* self, const GUID& guid, void** device, vo
     return hr;
 }
 
+// ---------------------------------------------------------------------------
+// Resolucao / memoria de video
+// O jogo descarta da lista de resolucoes os modos que "nao cabem" na memoria
+// de video livre, consultada por DirectDraw (GetAvailableVidMem). Em placas
+// modernas esse numero de 32 bits estoura e chega pequeno ou sem sentido, e
+// as resolucoes altas somem. Interceptamos a consulta e devolvemos 1 GB.
+// ---------------------------------------------------------------------------
+constexpr int   kDD7_GetAvailableVidMem = 23;
+constexpr DWORD kReportedVideoMem = 0x40000000; // 1 GB: cabe qualquer modo e nao estoura conta com sinal
+
+using DirectDrawCreateEx_t = HRESULT(WINAPI*)(GUID* guid, void** dd, const IID& iid, IUnknown* outer);
+using GetAvailableVidMem_t = HRESULT(WINAPI*)(void* self, void* caps, DWORD* total, DWORD* free);
+
+DirectDrawCreateEx_t g_origDirectDrawCreateEx = nullptr;
+GetAvailableVidMem_t g_origGetAvailableVidMem = nullptr;
+int                  g_vidMemLogs = 4;
+
+HRESULT WINAPI Hook_GetAvailableVidMem(void* self, void* caps, DWORD* total, DWORD* free) {
+    HRESULT hr = g_origGetAvailableVidMem(self, caps, total, free);
+    DWORD t = total ? *total : 0, f = free ? *free : 0;
+    if (total) *total = kReportedVideoMem;
+    if (free) *free = kReportedVideoMem;
+    if (g_vidMemLogs > 0) {
+        --g_vidMemLogs;
+        g_log("[coop] resolucao: memoria de video informada pelo sistema total=%lu livre=%lu (resultado 0x%08X); "
+              "repassando 1 GB ao jogo.", t, f, hr);
+    }
+    return S_OK;
+}
+
+HRESULT WINAPI Hook_DirectDrawCreateEx(GUID* guid, void** dd, const IID& iid, IUnknown* outer) {
+    HRESULT hr = g_origDirectDrawCreateEx(guid, dd, iid, outer);
+    if (SUCCEEDED(hr) && dd && *dd && !g_origGetAvailableVidMem) {
+        void* orig = nullptr;
+        if (PatchSlot(VTable(*dd), kDD7_GetAvailableVidMem, reinterpret_cast<void*>(&Hook_GetAvailableVidMem), &orig)) {
+            g_origGetAvailableVidMem = reinterpret_cast<GetAvailableVidMem_t>(orig);
+            g_log("[coop] resolucao: consulta de memoria de video interceptada.");
+        }
+    }
+    return hr;
+}
+
+// Troca uma entrada da tabela de importacao do executavel principal.
+bool PatchImport(const char* dll, const char* function, void* replacement, void** original) {
+    auto* base = reinterpret_cast<uint8_t*>(GetModuleHandleA(nullptr));
+    auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(base);
+    if (!base || dos->e_magic != IMAGE_DOS_SIGNATURE) return false;
+    auto* nt = reinterpret_cast<IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
+    const auto& dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+    if (!dir.VirtualAddress) return false;
+
+    for (auto* imp = reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR*>(base + dir.VirtualAddress); imp->Name; ++imp) {
+        if (lstrcmpiA(reinterpret_cast<const char*>(base + imp->Name), dll) != 0) continue;
+        if (!imp->OriginalFirstThunk) return false;
+        auto* names = reinterpret_cast<IMAGE_THUNK_DATA*>(base + imp->OriginalFirstThunk);
+        auto* slots = reinterpret_cast<IMAGE_THUNK_DATA*>(base + imp->FirstThunk);
+        for (; names->u1.AddressOfData; ++names, ++slots) {
+            if (names->u1.Ordinal & IMAGE_ORDINAL_FLAG) continue;
+            auto* byName = reinterpret_cast<IMAGE_IMPORT_BY_NAME*>(base + names->u1.AddressOfData);
+            if (std::strcmp(reinterpret_cast<const char*>(byName->Name), function) != 0) continue;
+            DWORD old;
+            if (!VirtualProtect(&slots->u1.Function, sizeof(void*), PAGE_READWRITE, &old)) return false;
+            *original = reinterpret_cast<void*>(slots->u1.Function);
+            slots->u1.Function = reinterpret_cast<ULONG_PTR>(replacement);
+            VirtualProtect(&slots->u1.Function, sizeof(void*), old, &old);
+            return true;
+        }
+    }
+    return false;
+}
+
+void LogDesktopMode() {
+    DEVMODEA dm{};
+    dm.dmSize = sizeof(dm);
+    if (EnumDisplaySettingsA(nullptr, ENUM_CURRENT_SETTINGS, &dm))
+        g_log("[coop] resolucao: area de trabalho em %lux%lu, %lu bits.", dm.dmPelsWidth, dm.dmPelsHeight,
+              dm.dmBitsPerPel);
+    bool has1080 = false;
+    DWORD maxW = 0, maxH = 0;
+    for (DWORD i = 0; EnumDisplaySettingsA(nullptr, i, &dm); ++i) {
+        if (dm.dmPelsWidth == 1920 && dm.dmPelsHeight == 1080) has1080 = true;
+        if (dm.dmPelsWidth * dm.dmPelsHeight > maxW * maxH) { maxW = dm.dmPelsWidth; maxH = dm.dmPelsHeight; }
+    }
+    g_log("[coop] resolucao: Windows oferece 1920x1080=%s, maior modo %lux%lu.", has1080 ? "sim" : "nao", maxW, maxH);
+}
+
 } // namespace
+
+void ApplyVideoMemoryFix(void (*log)(const char* fmt, ...)) {
+    g_log = log;
+    LogDesktopMode();
+    void* orig = nullptr;
+    if (PatchImport("ddraw.dll", "DirectDrawCreateEx", reinterpret_cast<void*>(&Hook_DirectDrawCreateEx), &orig)) {
+        g_origDirectDrawCreateEx = reinterpret_cast<DirectDrawCreateEx_t>(orig);
+        log("[coop] resolucao: DirectDrawCreateEx interceptado.");
+    } else {
+        log("[coop] resolucao: o executavel nao importa ddraw.dll!DirectDrawCreateEx; correcao de memoria de video inativa.");
+    }
+}
 
 void ApplyDpiAwareness(void (*log)(const char* fmt, ...)) {
     HMODULE user32 = GetModuleHandleA("user32.dll");

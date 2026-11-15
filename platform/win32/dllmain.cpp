@@ -239,6 +239,7 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID) {
         // Sob loader lock: apenas patch de memoria. Nada de LoadLibrary/sockets aqui.
         // As correcoes de sistema valem para qualquer versao do executavel.
         coop::win32::fixes::ApplyDpiAwareness(&Log);
+        coop::win32::fixes::ApplyVideoMemoryFix(&Log);
         InstallHooks();
     }
     return TRUE;
