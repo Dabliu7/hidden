@@ -72,11 +72,17 @@ WINEDLLOVERRIDES="dinput8=n,b" wine gta_sa.exe -coop-host
 
 ### Android
 
-O patcher (`tools/apk-patcher`) faz parte do milestone M1. O fluxo previsto:
+> Etapa inicial: a biblioteca carrega, abre/entra numa sessão e publica a posição do jogador. **Ainda
+> não há item no menu nem personagem remoto desenhado no mundo**, e o fluxo não foi validado em
+> aparelho.
 
 1. Faça backup dos saves e extraia o APK do jogo que você comprou.
-2. Rode o patcher: ele adiciona a `.so`, a chamada de carregamento, e reassina o APK.
+2. Rode o [apk-patcher](tools/apk-patcher/README.md) no PC: ele adiciona a `.so`, a chamada de
+   carregamento, e reassina o APK.
 3. Desinstale o original (a assinatura muda) e instale o APK gerado.
+4. Crie `Android/data/<pacote do jogo>/files/coop.txt` com `host` ou `connect <ip>`.
+
+O diagnóstico fica em `coop.log`, na mesma pasta do `coop.txt`.
 
 ## Compilação
 
@@ -124,7 +130,8 @@ automaticamente os pacotes de Windows e Android e o `SHA256SUMS.txt`.
 include/coop/      API pública do núcleo
 src/core/          núcleo portável (rede, netcode, política de script) — sem headers do jogo
 platform/win32/    dinput8.dll: proxy, hooks, endereços do 1.0 US
-platform/android/  libGTASA_Coop.so: JNI_OnLoad, resolução por símbolo
+platform/android/  libGTASA_Coop.so: JNI_OnLoad, gancho por tabela de importação, resolução por símbolo
+tools/apk-patcher/ adiciona a .so ao APK do usuário
 tests/             testes do núcleo (rodam sem o jogo)
 docs/              arquitetura e roadmap
 ```

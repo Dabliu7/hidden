@@ -118,7 +118,9 @@ endif()
 # Android: libGTASA_Coop.so
 # ---------------------------------------------------------------------------
 if(COOP_PLATFORM STREQUAL "android")
-  add_library(GTASA_Coop SHARED platform/android/entry.cpp)
+  add_library(GTASA_Coop SHARED
+    platform/android/entry.cpp
+    platform/android/GotHook.cpp)
   target_include_directories(GTASA_Coop PRIVATE platform)
   target_link_libraries(GTASA_Coop PRIVATE coop_core coop_options log)
   target_link_options(GTASA_Coop PRIVATE -Wl,--exclude-libs,ALL -Wl,-z,max-page-size=16384)

@@ -26,8 +26,9 @@ Objetivo: 2–4 jogadores se veem e se movem a pé no mundo livre. Sessão por l
 - [ ] `[win32]` Troca de contexto em `CPlayerPed::ProcessControl` (pad sintetizado, `PlayerInFocus`, mira)
 - [ ] `[core]` `PlayerSync`: bitmask lógico de teclas, correção exponencial, limiar de teleporte
 - [ ] `[win32]` Suprimir HUD/câmera/áudio/wanted para slots remotos
-- [ ] `[android][tools]` `apk-patcher`: injeta `.so`, linha de `loadLibrary`, zipalign, assinatura
-- [ ] `[android]` Backend de hook (ShadowHook ou Dobby) atrás de `Hook.h`; hook de `CGame::Process`
+- [x] `[android][tools]` `apk-patcher`: injeta `.so`, linha de `loadLibrary`, zipalign, assinatura — aguardando validação com APK real
+- [x] `[android]` Tique por quadro via gancho de importação (`glClear`/`eglSwapBuffers`), sessão por `coop.txt`, posição local por símbolos exportados — aguardando validação em aparelho
+- [ ] `[android]` Backend de inline hook (ShadowHook ou Dobby) atrás de `Hook.h`, para funções internas do jogo
 - [ ] `[android]` `Layout_armv7.h` / `Layout_arm64.h` + verificações de sanidade no boot
 - [ ] `[android]` Paridade com as issues `[win32]` acima (jogadores remotos, troca de contexto, toque → teclas lógicas)
 - [ ] `[core]` Forçar limitador a 30 FPS durante a sessão
