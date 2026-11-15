@@ -55,8 +55,8 @@ A DLL também aplica duas correções para Windows moderno, em qualquer versão 
 
 - **Resolução** — declara o jogo como *DPI-aware*, para que ele enxergue a resolução real do monitor
   quando a escala de tela do Windows está acima de 100 %.
-- **Mouse** — readquire o mouse automaticamente quando o DirectInput o perde (alt-tab, troca de modo
-  de vídeo), em vez de o mouse parar de responder.
+- **Mouse** — pede o mouse ao DirectInput em modo não-exclusivo e o readquire automaticamente quando
+  é perdido, para o caso clássico de o clique e a câmera não responderem no Windows 8 ou superior.
 
 Porta padrão: **7777/UDP**. O arquivo `coop.log` na pasta do jogo registra o que aconteceu.
 

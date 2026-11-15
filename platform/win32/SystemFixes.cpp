@@ -26,23 +26,34 @@ void (*g_log)(const char*, ...) = nullptr;
 // troca de modo de video, sobreposicoes), o dispositivo fica "nao adquirido" e
 // GetDeviceState passa a falhar - o mouse para de responder no jogo. Aqui,
 // qualquer leitura que falhe por esse motivo readquire o dispositivo e repete.
+//
+// Alem disso o jogo pede o mouse em modo EXCLUSIVO. No Windows 8 em diante a
+// aquisicao exclusiva falha com frequencia (ao sair do menu, por exemplo) e o
+// mouse fica morto: sem clique e sem girar a camera. Forcamos o modo
+// NAO-exclusivo, a mesma abordagem das correcoes conhecidas da comunidade.
 // ---------------------------------------------------------------------------
 constexpr GUID kGuidSysMouse = {0x6F1D2B60, 0xD5A0, 0x11CF, {0xBF, 0xC7, 0x44, 0x45, 0x53, 0x54, 0x00, 0x00}};
-constexpr HRESULT kInputLost   = static_cast<HRESULT>(0x8007001EL); // DIERR_INPUTLOST
-constexpr HRESULT kNotAcquired = static_cast<HRESULT>(0x8007000CL); // DIERR_NOTACQUIRED
 
 // Indices nas vtables COM (dinput.h)
 constexpr int kDI8_CreateDevice    = 3;
 constexpr int kDev_Acquire         = 7;
 constexpr int kDev_GetDeviceState  = 9;
+constexpr int kDev_SetCoopLevel    = 13;
+
+constexpr DWORD kExclusive    = 0x1; // DISCL_EXCLUSIVE
+constexpr DWORD kNonExclusive = 0x2; // DISCL_NONEXCLUSIVE
 
 using CreateDevice_t   = HRESULT(WINAPI*)(void* self, const GUID& guid, void** device, void* outer);
 using GetDeviceState_t = HRESULT(WINAPI*)(void* self, DWORD size, void* data);
 using Acquire_t        = HRESULT(WINAPI*)(void* self);
+using SetCoopLevel_t   = HRESULT(WINAPI*)(void* self, HWND window, DWORD flags);
 
 CreateDevice_t   g_origCreateDevice = nullptr;
 GetDeviceState_t g_origGetDeviceState = nullptr;
+Acquire_t        g_origAcquire = nullptr;
+SetCoopLevel_t   g_origSetCoopLevel = nullptr;
 void*            g_mouse = nullptr;
+int              g_logBudget = 12; // diagnostico limitado: nao encher o log
 bool             g_loggedRecovery = false;
 
 void** VTable(void* object) { return *reinterpret_cast<void***>(object); }
@@ -56,11 +67,30 @@ bool PatchSlot(void** vtable, int index, void* replacement, void** original) {
     return true;
 }
 
+HRESULT WINAPI Hook_SetCoopLevel(void* self, HWND window, DWORD flags) {
+    if (self != g_mouse) return g_origSetCoopLevel(self, window, flags);
+    DWORD fixed = (flags & ~kExclusive) | kNonExclusive;
+    HRESULT hr = g_origSetCoopLevel(self, window, fixed);
+    if (g_logBudget > 0) {
+        --g_logBudget;
+        g_log("[coop] mouse: modo cooperativo 0x%X -> 0x%X (resultado 0x%08X).", flags, fixed, hr);
+    }
+    return hr;
+}
+
+HRESULT WINAPI Hook_Acquire(void* self) {
+    HRESULT hr = g_origAcquire(self);
+    if (self == g_mouse && FAILED(hr) && g_logBudget > 0) {
+        --g_logBudget;
+        g_log("[coop] mouse: Acquire falhou (0x%08X).", hr);
+    }
+    return hr;
+}
+
 HRESULT WINAPI Hook_GetDeviceState(void* self, DWORD size, void* data) {
     HRESULT hr = g_origGetDeviceState(self, size, data);
-    if (self == g_mouse && (hr == kInputLost || hr == kNotAcquired)) {
-        auto acquire = reinterpret_cast<Acquire_t>(VTable(self)[kDev_Acquire]);
-        if (SUCCEEDED(acquire(self))) {
+    if (self == g_mouse && FAILED(hr)) {
+        if (SUCCEEDED(g_origAcquire(self))) {
             hr = g_origGetDeviceState(self, size, data);
             if (!g_loggedRecovery) {
                 g_loggedRecovery = true;
@@ -77,10 +107,15 @@ HRESULT WINAPI Hook_CreateDevice(void* self, const GUID& guid, void** device, vo
 
     g_mouse = *device;
     if (!g_origGetDeviceState) {
-        void* orig = nullptr;
-        if (PatchSlot(VTable(g_mouse), kDev_GetDeviceState, reinterpret_cast<void*>(&Hook_GetDeviceState), &orig)) {
-            g_origGetDeviceState = reinterpret_cast<GetDeviceState_t>(orig);
-            g_log("[coop] mouse: correcao de readquisicao instalada.");
+        void *state = nullptr, *acquire = nullptr, *coop = nullptr;
+        void** vt = VTable(g_mouse);
+        if (PatchSlot(vt, kDev_Acquire, reinterpret_cast<void*>(&Hook_Acquire), &acquire) &&
+            PatchSlot(vt, kDev_SetCoopLevel, reinterpret_cast<void*>(&Hook_SetCoopLevel), &coop) &&
+            PatchSlot(vt, kDev_GetDeviceState, reinterpret_cast<void*>(&Hook_GetDeviceState), &state)) {
+            g_origAcquire = reinterpret_cast<Acquire_t>(acquire);
+            g_origSetCoopLevel = reinterpret_cast<SetCoopLevel_t>(coop);
+            g_origGetDeviceState = reinterpret_cast<GetDeviceState_t>(state);
+            g_log("[coop] mouse: correcao instalada (nao-exclusivo + readquisicao).");
         } else {
             g_log("[coop] mouse: nao foi possivel instalar a correcao.");
         }
