@@ -203,9 +203,20 @@ void CrashHandler(int sig, siginfo_t* info, void* context) {
             }
         }
     }
-    // Devolve ao tratador anterior (o do jogo / do sistema) para o encerramento normal.
-    if (sig >= 0 && sig < 32) sigaction(sig, &g_oldActions[sig], nullptr);
-    raise(sig);
+    // Repassa ao tratador anterior com as MESMAS informacoes do sinal. O runtime
+    // do Android usa SIGSEGV internamente (checagens implicitas) e precisa do
+    // endereco original da falha; reemitir com raise() perderia esse dado.
+    if (sig < 0 || sig >= 32) return;
+    const struct sigaction& old = g_oldActions[sig];
+    if (old.sa_flags & SA_SIGINFO) {
+        if (old.sa_sigaction) old.sa_sigaction(sig, info, context);
+    } else if (old.sa_handler == SIG_DFL) {
+        // Sem tratador anterior: restaura o padrao e retorna; a instrucao que
+        // falhou e reexecutada e o sistema encerra o processo normalmente.
+        signal(sig, SIG_DFL);
+    } else if (old.sa_handler != SIG_IGN) {
+        old.sa_handler(sig);
+    }
 }
 
 void InstallCrashHandler() {

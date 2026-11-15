@@ -68,6 +68,9 @@ def main():
     ap.add_argument("--out", type=Path, default=Path("gta-sa-coop.apk"))
     ap.add_argument("--keystore", type=Path, default=Path("coop-debug.keystore"),
                     help="chave de assinatura (criada se nao existir)")
+    ap.add_argument("--no-inject", action="store_true",
+                    help="so remonta e reassina, SEM adicionar o coop (teste de controle: "
+                         "separa problemas do reempacotamento de problemas da biblioteca)")
     args = ap.parse_args()
 
     if not args.apk.is_file():
@@ -85,7 +88,7 @@ def main():
         abis = [d.name for d in lib_root.iterdir() if (d / "libGTASA.so").is_file()] if lib_root.is_dir() else []
         if not abis:
             sys.exit("erro: o APK nao contem lib/<abi>/libGTASA.so (APK dividido? use o APK base completo).")
-        for abi in abis:
+        for abi in ([] if args.no_inject else abis):
             src = args.libs / "lib" / abi / LIB_NAME
             if not src.is_file():
                 sys.exit(f"erro: falta {src} (o pacote de release tem essa ABI?)")
@@ -94,7 +97,7 @@ def main():
 
         # 3. smali
         patched = 0
-        for smali in work.glob("smali*/**/*.smali"):
+        for smali in ([] if args.no_inject else work.glob("smali*/**/*.smali")):
             text = smali.read_text(encoding="utf-8", errors="surrogateescape")
             if '"GTASA"' not in text:
                 continue
@@ -103,7 +106,7 @@ def main():
                 smali.write_text(new, encoding="utf-8", errors="surrogateescape")
                 patched += n
                 print(f"loadLibrary inserido em {smali.relative_to(work)}")
-        if not patched:
+        if not patched and not args.no_inject:
             sys.exit('erro: nao encontrei System.loadLibrary("GTASA") no APK; nada foi alterado.')
 
         # 4. remonta, alinha, assina
